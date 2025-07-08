@@ -1,18 +1,32 @@
 // server.js
-const express = require('express');
-const bodyParser = require('body-parser');
-const Database = require('better-sqlite3');
-const twilio = require('twilio');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const apicache = require('apicache');
-require('dotenv').config();
+import express from 'express';
+import bodyParser from 'body-parser';
+import { Pool } from 'pg'; // Use pg for PostgreSQL
+import twilio from 'twilio'; 
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import apicache from 'apicache';
+import dotenv from 'dotenv'; // Import dotenv
+import { fileURLToPath } from 'url'; // Import fileURLToPath
+dotenv.config(); // Call config after import
+
+const __filename = fileURLToPath(import.meta.url); // Correct way to get __filename
+const __dirname = path.dirname(__filename); // Correctly derive __dirname
 
 const app = express();
-const db = new Database('sarees.db');
+// const db = new Database('sarees.db'); // Removed SQLite database connection
 const cache = apicache.middleware;
 const PORT = process.env.PORT || 3001;
+
+// Database Connection for PostgreSQL
+const pool = new Pool({
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || 'adhavansilks_db',
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT || 5432,
+});
 
 // Twilio WhatsApp Config
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -50,19 +64,26 @@ function sendWhatsAppNotification(saree) {
 }
 
 // Get Saree by ID
-app.get('/api/sarees/:id', (req, res) => {
+app.get('/api/sarees/:id', async (req, res) => {
   try {
-    const saree = db.prepare(`
-      SELECT s.*, GROUP_CONCAT(sc.color) AS colors, GROUP_CONCAT(si.image_path) AS images
+    // Replaced GROUP_CONCAT with STRING_AGG and ? with $1
+    const result = await pool.query(`
+      SELECT
+        s.*,
+        STRING_AGG(sc.color, ',') AS colors,
+        STRING_AGG(si.image_path, ',') AS images
       FROM sarees s
-      LEFT JOIN saree_colors sc ON s.id = sc.saree_id
-      LEFT JOIN saree_images si ON s.id = si.saree_id
-      WHERE s.id = ?
-      GROUP BY s.id
-    `).get(req.params.id);
+      LEFT JOIN saree_colors sc ON s.product_id = sc.saree_id
+      LEFT JOIN saree_images si ON s.product_id = si.saree_id
+      WHERE s.product_id = $1
+      GROUP BY s.product_id
+    `, [req.params.id]); // Changed to use array for parameters
+
+    const saree = result.rows[0];
 
     if (!saree) return res.status(404).json({ error: 'Saree not found' });
 
+    // Colors and images are already strings from STRING_AGG, split them
     saree.colors = saree.colors ? saree.colors.split(',') : [];
     saree.images = saree.images ? saree.images.split(',') : [];
     res.json(saree);
@@ -72,9 +93,10 @@ app.get('/api/sarees/:id', (req, res) => {
 });
 
 // WhatsApp Link Endpoint
-app.get('/api/sarees/:id/whatsapp-link', (req, res) => {
+app.get('/api/sarees/:id/whatsapp-link', async (req, res) => {
   try {
-    const saree = db.prepare(`SELECT name, price, description FROM sarees WHERE id = ?`).get(req.params.id);
+    const result = await pool.query(`SELECT name, price, description FROM sarees WHERE product_id = $1`, [req.params.id]);
+    const saree = result.rows[0];
     if (!saree) return res.status(404).json({ error: 'Saree not found' });
 
     const productLink = `https://yourdomain.com/saree/${req.params.id}`;
@@ -94,7 +116,7 @@ app.get('/api/sarees/:id/whatsapp-link', (req, res) => {
 });
 
 // Filtered Saree List
-app.get('/api/sarees', cache('5 minutes'), (req, res) => {
+app.get('/api/sarees', cache('5 minutes'), async (req, res) => {
   try {
     const filters = {
       category: req.query.category,
@@ -108,43 +130,48 @@ app.get('/api/sarees', cache('5 minutes'), (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
 
     let query = `
-      SELECT s.*, GROUP_CONCAT(sc.color) AS colors, GROUP_CONCAT(si.image_path) AS images
+      SELECT
+        s.*,
+        STRING_AGG(sc.color, ',') AS colors,
+        STRING_AGG(si.image_path, ',') AS images
       FROM sarees s
-      LEFT JOIN saree_colors sc ON s.id = sc.saree_id
-      LEFT JOIN saree_images si ON s.id = si.saree_id
+      LEFT JOIN saree_colors sc ON s.product_id = sc.saree_id
+      LEFT JOIN saree_images si ON s.product_id = si.saree_id
       WHERE s.is_active = TRUE
     `;
     const params = [];
+    let paramIndex = 1;
 
     if (filters.category) {
-      query += ' AND s.category = ?';
+      query += ` AND s.category = $${paramIndex++}`;
       params.push(filters.category);
     }
 
     if (!isNaN(filters.minPrice)) {
-      query += ' AND s.price >= ?';
+      query += ` AND s.price >= $${paramIndex++}`;
       params.push(filters.minPrice);
     }
 
     if (!isNaN(filters.maxPrice)) {
-      query += ' AND s.price <= ?';
+      query += ` AND s.price <= $${paramIndex++}`;
       params.push(filters.maxPrice);
     }
 
     if (filters.color) {
-      query += ` AND EXISTS (SELECT 1 FROM saree_colors WHERE saree_id = s.id AND color = ?)`;
+      query += ` AND EXISTS (SELECT 1 FROM saree_colors WHERE saree_id = s.product_id AND color = $${paramIndex++})`;
       params.push(filters.color);
     }
 
     if (filters.search) {
-      query += ' AND (s.name LIKE ? OR s.description LIKE ?)';
+      query += ` AND (s.name ILIKE $${paramIndex++} OR s.description ILIKE $${paramIndex++})`; // ILIKE for case-insensitive search in PostgreSQL
       params.push(`%${filters.search}%`, `%${filters.search}%`);
     }
 
-    query += ' GROUP BY s.id LIMIT ? OFFSET ?';
+    query += ` GROUP BY s.product_id ORDER BY s.product_id LIMIT $${paramIndex++} OFFSET $${paramIndex++}`; // Added ORDER BY for consistent LIMIT/OFFSET behavior
     params.push(limit, (page - 1) * limit);
 
-    const sarees = db.prepare(query).all(...params).map(s => ({
+    const result = await pool.query(query, params);
+    const sarees = result.rows.map(s => ({
       ...s,
       colors: s.colors ? s.colors.split(',') : [],
       images: s.images ? s.images.split(',') : [],
@@ -157,23 +184,25 @@ app.get('/api/sarees', cache('5 minutes'), (req, res) => {
 });
 
 // Dummy Saree Create (simplified)
-app.post('/api/sarees', (req, res) => {
+app.post('/api/sarees', async (req, res) => {
   try {
     const s = req.body;
-
-    db.prepare(`
-      INSERT INTO sarees (id, name, price, description, category, materialType, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run(s.id, s.name, s.price, s.description, s.category, s.materialType);
+    // Changed id to product_id
+    await pool.query(`
+      INSERT INTO sarees (product_id, name, price, description, category, material, is_active, date_added)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [s.product_id, s.name, s.price, s.description, s.category, s.material, s.is_active, s.date_added]); // Use product_id
 
     if (Array.isArray(s.colors)) {
-      const stmt = db.prepare('INSERT INTO saree_colors (saree_id, color) VALUES (?, ?)');
-      s.colors.forEach(color => stmt.run(s.id, color));
+      for (const color of s.colors) {
+        await pool.query('INSERT INTO saree_colors (saree_id, color) VALUES ($1, $2)', [s.product_id, color]);
+      }
     }
 
     if (Array.isArray(s.images)) {
-      const stmt = db.prepare('INSERT INTO saree_images (saree_id, image_path, is_primary) VALUES (?, ?, ?)');
-      s.images.forEach(img => stmt.run(s.id, img.path, img.is_primary ? 1 : 0));
+      for (const img of s.images) {
+        await pool.query('INSERT INTO saree_images (saree_id, image_path, is_primary) VALUES ($1, $2, $3)', [s.product_id, img.path, img.is_primary]); // is_primary directly
+      }
     }
 
     sendWhatsAppNotification(s);
@@ -189,4 +218,10 @@ app.use('/uploads', express.static(uploadDir));
 // Start Server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+});
+
+// Close the PostgreSQL pool when the application exits
+process.on('beforeExit', async () => {
+  await pool.end();
+  console.log('PostgreSQL pool closed.');
 });
