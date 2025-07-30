@@ -221,7 +221,7 @@ app.listen(PORT, () => {
 });
 
 // Close the PostgreSQL pool when the application exits
-process.on('beforeExit', async () => {
-  await pool.end();
-  console.log('PostgreSQL pool closed.');
-});
+// process.on('beforeExit', async () => {
+//   await pool.end();
+//   console.log('PostgreSQL pool closed.');
+// });
