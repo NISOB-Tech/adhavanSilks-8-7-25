@@ -59,6 +59,7 @@
     "nodemailer": "^7.0.4",
     "papaparse": "^5.5.3",
     "pg": "^8.16.3",
+    "raect": "^1.0.4",
     "react": "^18.3.1",
     "react-day-picker": "^8.10.1",
     "react-dom": "^18.3.1",

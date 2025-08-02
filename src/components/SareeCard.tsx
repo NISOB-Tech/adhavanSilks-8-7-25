@@ -44,11 +44,7 @@ const SareeCard = ({ saree }: SareeCardProps) => {
           )}
         </AspectRatio>
 
-        {saree.materialType && (
-          <Badge className="absolute top-2 right-2 bg-white text-black shadow">
-            {saree.materialType}
-          </Badge>
-        )}
+      
         {saree.discount && (
           <Badge className="absolute top-2 left-2 bg-red-500 text-white shadow">
             {saree.discount}% OFF
